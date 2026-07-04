@@ -16,9 +16,14 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Runtime deps are exact-pinned in requirements.in for deterministic builds.
-COPY requirements.in ./requirements.in
-RUN pip install --no-cache-dir --target /wheels -r requirements.in
+# Runtime deps install from the hash-pinned lockfile. Every transitive dep is
+# locked with sha256 hashes; --require-hashes refuses anything that doesn't match.
+# Regenerate with (target the Linux runtime so platform-only deps like
+# SecretStorage/jeepney are locked; compiling on macOS omits them):
+#   uv pip compile requirements.in -o requirements.lock --generate-hashes \
+#     --python-version 3.13 --python-platform linux
+COPY requirements.lock ./requirements.lock
+RUN pip install --no-cache-dir --require-hashes --target /wheels -r requirements.lock
 
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
