@@ -157,9 +157,21 @@ The CISA KEV join works in all three modes as long as the cache has been populat
 
 ## Roadmap (Phase 2)
 
+None of the below is implemented yet. This tool deliberately does one job well; these are directions, not commitments.
+
+**Composition, not competition.** `mcp-nixreview` is one stage in a pipeline, not a replacement for the tools around it:
+
+```
+agent writes config              →  mcp-nixreview reviews          →  human approves  →  apply layer
+(optionally grounded by             (security meaning + CVE/KEV,                          (e.g. vespo92/mcp-nixos-ops,
+ utensils/mcp-nixos for              graded, gated, ledgered)                              rebuild-switch over SSH)
+ accurate package/option data)
+```
+
+- **Hand-off to an apply layer after approval.** `mcp-nixreview` never applies changes and never will. A Phase-2 integration would, on approval, hand the reviewed change to an apply-capable ops layer such as [`vespo92/mcp-nixos-ops`](https://github.com/vespo92/mcp-nixos-ops). It composes with that tool rather than competing with it: this one *reviews*, that one *applies*.
+- **Evaluated-config grounding (reduces the disclosed false-negative weakness).** The biggest known limitation is that `review_diff` matches diff *text* with regexes and does not evaluate the NixOS module system. A Phase-2 upgrade would move it toward reading *evaluated* nixpkgs/option values, borrowing the grounding *technique* (not the code) from the [`utensils/mcp-nixos`](https://github.com/utensils/mcp-nixos) world, so risks hidden in custom modules or indirect option resolution are caught. This must be **designed against a live NixOS host first**, so it is intentionally deferred until then.
 - `detect_drift(host)` — compare a running generation's closure to the declared one (accountability for a declarative fleet).
 - `render_review(review_id)` — a PR-comment-style rendered review.
-- Optional hand-off to an apply-capable ops layer after approval.
 - Signed attestations; `sops-nix` secret-exposure checks; multi-host rollups.
 
 ---
