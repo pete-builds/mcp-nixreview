@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-nixreview"
+version = "0.1.0"
+description = "Advisory NixOS change-review + CVE/KEV attestation gate (MCP server)"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "pete-builds" }]
+keywords = ["mcp", "nixos", "security", "cve", "kev", "fastmcp"]
+
+dependencies = [
+    "fastmcp==3.2.4",
+    "httpx==0.28.1",
+    "uvicorn==0.46.0",
+    "python-dotenv==1.2.2",
+    "pydantic==2.13.3",
+    "pydantic-settings==2.14.0",
+    "tzdata==2025.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==8.4.2", "pytest-asyncio==1.2.0", "ruff==0.9.6"]
+
+[project.scripts]
+mcp-nixreview = "mcp_nixreview.server:main"
+
+[project.urls]
+Homepage = "https://github.com/pete-builds/mcp-nixreview"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mcp_nixreview = ["py.typed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S101"]  # asserts are fine in tests
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B"]

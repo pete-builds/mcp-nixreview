@@ -1,0 +1,23 @@
+[
+  {
+    "name": "apache-log4j-2.14.1",
+    "pname": "apache-log4j",
+    "version": "2.14.1",
+    "derivation": "/nix/store/xxxx-apache-log4j-2.14.1.drv",
+    "affected_by": ["CVE-2021-44228", "CVE-2021-45046"]
+  },
+  {
+    "name": "openssl-3.0.1",
+    "pname": "openssl",
+    "version": "3.0.1",
+    "derivation": "/nix/store/yyyy-openssl-3.0.1.drv",
+    "affected_by": ["CVE-2022-0778"]
+  },
+  {
+    "name": "curl-7.79.0",
+    "pname": "curl",
+    "version": "7.79.0",
+    "derivation": "/nix/store/zzzz-curl-7.79.0.drv",
+    "affected_by": ["CVE-2021-22947"]
+  }
+]

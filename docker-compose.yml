@@ -1,0 +1,39 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  mcp-nixreview:
+    build: .
+    image: mcp-nixreview:0.1.0
+    container_name: mcp-nixreview
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16M
+    ports:
+      - "${MCP_PORT:-3722}:${MCP_PORT:-3722}"
+    env_file:
+      - .env
+    environment:
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "${MCP_PORT:-3722}"
+      DATA_DIR: "/data"
+      TZ: "${TZ:-America/New_York}"
+    volumes:
+      # Named volume: append-only audit ledger, review state, KEV cache.
+      - nixreview-data:/data
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "python", "-m", "mcp_nixreview.healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  nixreview-data:

@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+.coverage
+coverage.xml
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local build/session notes — not for public consumption
+SESSION-RESUME.md
+
+# Host-specific compose overrides stay local
+docker-compose.override.yml
+
+# Runtime data (ledger, KEV cache) if ever written outside the volume
+/data/
+*.jsonl
+kev_cache.json

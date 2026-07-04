@@ -1,0 +1,26 @@
+diff --git a/configuration.nix b/configuration.nix
+--- a/configuration.nix
++++ b/configuration.nix
+@@ -10,14 +10,17 @@
+   networking.hostName = "web01";
+   networking.firewall.enable = true;
+-  networking.firewall.allowedTCPPorts = [ 80 443 ];
++  networking.firewall.allowedTCPPorts = [ 80 443 22 5432 ];
+
+   services.openssh.enable = true;
+-  services.openssh.settings.PermitRootLogin = "no";
+-  services.openssh.settings.PasswordAuthentication = false;
++  services.openssh.settings.PermitRootLogin = "yes";
++  services.openssh.settings.PasswordAuthentication = true;
+
+   users.users.deploy = {
+     isNormalUser = true;
+-    extraGroups = [ "docker" ];
++    extraGroups = [ "docker" "wheel" ];
+   };
++  security.sudo.wheelNeedsPassword = false;
+
+-  services.fail2ban.enable = true;
++  services.fail2ban.enable = false;
+
++  services.postgresql.settings.listen_addresses = "0.0.0.0";
