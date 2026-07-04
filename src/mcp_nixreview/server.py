@@ -3,7 +3,7 @@
 Seven tools, Streamable HTTP (FastMCP). ADVISORY, NOT AUTHORITATIVE: this
 server reviews a curated set of security-relevant NixOS options and joins a
 coarse CVE scan to CISA KEV. It NEVER applies a change; it records a human
-decision and writes an append-only audit ledger.
+decision and writes an append-only, hash-chained (tamper-evident) audit ledger.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from mcp_nixreview import ADVISORY_NOTICE, __version__
+from mcp_nixreview import ADVISORY_NOTICE, ADVISORY_SHORT, __version__
 from mcp_nixreview.clients.kev import KevCache, KevError
 from mcp_nixreview.config import Settings, load_settings
 from mcp_nixreview.logging_setup import configure_logging
@@ -30,6 +30,9 @@ _MAX_INLINE_CONFIG_BYTES = 512 * 1024  # 512 KiB guard on inline config text
 
 
 def _ok(data: Any) -> str:
+    # Every success response carries a short, unavoidable advisory banner.
+    if isinstance(data, dict) and "advisory" not in data:
+        data = {**data, "advisory": ADVISORY_SHORT}
     return json.dumps({"data": data}, default=str, indent=2)
 
 
@@ -425,10 +428,12 @@ def build_server(
     # ------------------------------------------------------------------
     @mcp.tool()
     async def get_audit_log(review_id: str = "", limit: int = 50) -> str:
-        """Read the append-only audit ledger (audit.jsonl).
+        """Read the append-only, hash-chained audit ledger (audit.jsonl).
 
         Every review, attestation, approval request, and decision appends one
-        immutable line here. Read-only, idempotent.
+        line carrying prev_hash + record_hash, so the ledger is tamper-EVIDENT
+        (not tamper-proof) — use verify_ledger to check the chain. Read-only,
+        idempotent.
 
         Args:
             review_id: Optional. Filter to a single review's events.
@@ -449,7 +454,37 @@ def build_server(
             return _err(f"unexpected error: {exc}", "INTERNAL")
 
     # ------------------------------------------------------------------
-    # 7. refresh_kev_cache
+    # 7. verify_ledger
+    # ------------------------------------------------------------------
+    @mcp.tool()
+    async def verify_ledger() -> str:
+        """Verify the audit ledger's hash chain is intact (tamper-evidence).
+
+        The ledger (audit.jsonl) is append-only AND hash-chained: each record
+        carries prev_hash + record_hash. This tool recomputes the whole chain
+        and reports whether any record was edited, deleted, or reordered. It is
+        tamper-EVIDENT, not tamper-proof: a local writer can still alter the
+        file, but not without breaking the chain this check detects.
+
+        Args: none. Read-only, idempotent.
+
+        Returns:
+            Success: {"data": {"ok": bool, "entries": int, "head_hash": str,
+                "broken_at": int|null, "reason": str|null}}. ``ok: true`` means
+            the chain verifies; ``broken_at`` is the 1-based line of the first
+            bad record when ``ok`` is false.
+
+        Example:
+            verify_ledger()
+        """
+        try:
+            return _ok(store.verify_chain())
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("verify_ledger failed")
+            return _err(f"unexpected error: {exc}", "INTERNAL")
+
+    # ------------------------------------------------------------------
+    # 8. refresh_kev_cache
     # ------------------------------------------------------------------
     @mcp.tool()
     async def refresh_kev_cache() -> str:

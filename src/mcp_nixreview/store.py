@@ -1,9 +1,16 @@
-"""Persistence: append-only audit ledger + queryable review state.
+"""Persistence: append-only, hash-chained audit ledger + queryable review state.
 
 Two files under ``data_dir``:
 
-- ``audit.jsonl`` — append-only, one JSON line per event (immutable history).
-  Every review action writes a line here and it is never rewritten.
+- ``audit.jsonl`` — append-only, one JSON line per event, **hash-chained** so
+  the ledger is tamper-EVIDENT (not tamper-proof). Each record carries a
+  ``prev_hash`` (the previous record's ``record_hash``, or 64 zeros for the
+  genesis record) and a ``record_hash`` = sha256 over the record's content plus
+  ``prev_hash``. Any edit, deletion, or reordering breaks the chain, which
+  ``verify_chain()`` detects. A local process with write access can still
+  rewrite the file, but it cannot do so *undetectably* without recomputing every
+  downstream hash — and it still cannot forge a record that matches an
+  externally recorded head hash.
 - ``reviews.json`` — current state of each review, keyed by ``review_id``
   (rewritten on update, so ``list_reviews`` is cheap). The ledger is the
   source of truth for history; this file is a materialised view.
@@ -14,6 +21,7 @@ grades, CVE/KEV metadata, and human decisions.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -73,10 +81,47 @@ class Store:
         reviews.sort(key=lambda r: r.get("created_at", ""), reverse=True)
         return reviews[: max(0, limit)]
 
-    # -- audit ledger (append-only) ----------------------------------------
+    # -- audit ledger (append-only, hash-chained) --------------------------
+
+    GENESIS_HASH = "0" * 64
+
+    @staticmethod
+    def _record_hash(content: dict, prev_hash: str) -> str:
+        """sha256 over the canonical content plus prev_hash.
+
+        ``content`` is the record WITHOUT its own ``record_hash`` field. Keys are
+        sorted so the digest is stable regardless of dict insertion order.
+        """
+        payload = json.dumps(
+            {"content": content, "prev_hash": prev_hash},
+            sort_keys=True,
+            default=str,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _last_hash(self) -> str:
+        """Return the record_hash of the last ledger line, or GENESIS if empty."""
+        if not self.audit_path.exists():
+            return self.GENESIS_HASH
+        last = self.GENESIS_HASH
+        with self.audit_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                last = rec.get("record_hash", last)
+        return last
 
     def append_audit(self, event: dict) -> None:
-        record = {"ts": self.now_iso(), **event}
+        prev_hash = self._last_hash()
+        content = {"ts": self.now_iso(), **event}
+        record = {**content, "prev_hash": prev_hash}
+        record["record_hash"] = self._record_hash(content, prev_hash)
         with self.audit_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, default=str) + "\n")
 
@@ -97,3 +142,51 @@ class Store:
                     continue
                 entries.append(rec)
         return entries[-max(0, limit):]
+
+    def verify_chain(self) -> dict:
+        """Verify the audit ledger's hash chain end-to-end.
+
+        Recomputes each record's hash from its content + the previous record's
+        hash and checks the linkage. Detects edits, deletions, reordering, and a
+        broken genesis link.
+
+        Returns a dict:
+            {"ok": bool, "entries": int, "head_hash": str,
+             "broken_at": int|None, "reason": str|None}
+        ``broken_at`` is the 1-based line number of the first bad record.
+        Legacy records written before hash-chaining (no ``record_hash``) are
+        reported as ``ok: false`` with reason "unchained legacy record".
+        """
+        if not self.audit_path.exists():
+            return {"ok": True, "entries": 0, "head_hash": self.GENESIS_HASH,
+                    "broken_at": None, "reason": None}
+        prev = self.GENESIS_HASH
+        count = 0
+        with self.audit_path.open("r", encoding="utf-8") as fh:
+            for lineno, line in enumerate(fh, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                count += 1
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    return {"ok": False, "entries": count, "head_hash": prev,
+                            "broken_at": lineno, "reason": "malformed JSON line"}
+                if "record_hash" not in rec or "prev_hash" not in rec:
+                    return {"ok": False, "entries": count, "head_hash": prev,
+                            "broken_at": lineno,
+                            "reason": "unchained legacy record (no hash fields)"}
+                content = {k: v for k, v in rec.items()
+                           if k not in ("record_hash", "prev_hash")}
+                if rec["prev_hash"] != prev:
+                    return {"ok": False, "entries": count, "head_hash": prev,
+                            "broken_at": lineno, "reason": "prev_hash does not link"}
+                expected = self._record_hash(content, rec["prev_hash"])
+                if rec["record_hash"] != expected:
+                    return {"ok": False, "entries": count, "head_hash": prev,
+                            "broken_at": lineno,
+                            "reason": "record_hash mismatch (content altered)"}
+                prev = rec["record_hash"]
+        return {"ok": True, "entries": count, "head_hash": prev,
+                "broken_at": None, "reason": None}
