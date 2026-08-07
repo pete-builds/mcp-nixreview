@@ -1,16 +1,17 @@
 """Persistence: append-only, hash-chained audit ledger + queryable review state.
 
-Two files under ``data_dir``:
+Three files under ``data_dir``:
 
 - ``audit.jsonl`` — append-only, one JSON line per event, **hash-chained** so
   the ledger is tamper-EVIDENT (not tamper-proof). Each record carries a
   ``prev_hash`` (the previous record's ``record_hash``, or 64 zeros for the
   genesis record) and a ``record_hash`` = sha256 over the record's content plus
   ``prev_hash``. Any edit, deletion, or reordering breaks the chain, which
-  ``verify_chain()`` detects. A local process with write access can still
-  rewrite the file, but it cannot do so *undetectably* without recomputing every
-  downstream hash — and it still cannot forge a record that matches an
-  externally recorded head hash.
+  ``verify_chain()`` detects.
+- ``audit.head.json`` — trusted head sidecar recording ``{head_hash, entries}``
+  after each successful append. ``verify_chain()`` compares the walked ledger
+  against this sidecar so suffix deletion or wholesale truncation is caught
+  even when the surviving lines still link cleanly.
 - ``reviews.json`` — current state of each review, keyed by ``review_id``
   (rewritten on update, so ``list_reviews`` is cheap). The ledger is the
   source of truth for history; this file is a materialised view.
@@ -21,6 +22,7 @@ grades, CVE/KEV metadata, and human decisions.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import logging
@@ -38,6 +40,7 @@ class Store:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.audit_path = self.data_dir / "audit.jsonl"
+        self.head_path = self.data_dir / "audit.head.json"
         self.reviews_path = self.data_dir / "reviews.json"
         try:
             self._tz = ZoneInfo(timezone)
@@ -117,13 +120,44 @@ class Store:
                 last = rec.get("record_hash", last)
         return last
 
+    def _load_trusted_head(self) -> dict:
+        if not self.head_path.exists():
+            return {"head_hash": self.GENESIS_HASH, "entries": 0}
+        try:
+            data = json.loads(self.head_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {"head_hash": self.GENESIS_HASH, "entries": 0}
+        head_hash = data.get("head_hash", self.GENESIS_HASH)
+        entries = data.get("entries", 0)
+        return {"head_hash": head_hash, "entries": entries}
+
+    def _save_trusted_head(self, head_hash: str, entries: int) -> None:
+        tmp = self.head_path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps({"head_hash": head_hash, "entries": entries}),
+            encoding="utf-8",
+        )
+        tmp.replace(self.head_path)
+
     def append_audit(self, event: dict) -> None:
-        prev_hash = self._last_hash()
-        content = {"ts": self.now_iso(), **event}
-        record = {**content, "prev_hash": prev_hash}
-        record["record_hash"] = self._record_hash(content, prev_hash)
+        # Serialize the full read-hash-then-append with an advisory POSIX file
+        # lock on the ledger itself. Concurrent workers on the same host block
+        # here so prev_hash stays monotonic and the chain never forks.
+        self.audit_path.touch(exist_ok=True)
         with self.audit_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, default=str) + "\n")
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                trusted = self._load_trusted_head()
+                prev_hash = self._last_hash()
+                content = {"ts": self.now_iso(), **event}
+                record = {**content, "prev_hash": prev_hash}
+                record["record_hash"] = self._record_hash(content, prev_hash)
+                fh.write(json.dumps(record, default=str) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+                self._save_trusted_head(record["record_hash"], trusted["entries"] + 1)
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
     def read_audit(self, review_id: str = "", limit: int = 50) -> list[dict]:
         if not self.audit_path.exists():
@@ -147,17 +181,28 @@ class Store:
         """Verify the audit ledger's hash chain end-to-end.
 
         Recomputes each record's hash from its content + the previous record's
-        hash and checks the linkage. Detects edits, deletions, reordering, and a
-        broken genesis link.
+        hash and checks the linkage. Detects edits, reordering, mid-chain
+        deletions, and a broken genesis link. After walking the chain the
+        result is cross-checked against the trusted head sidecar
+        (``audit.head.json``) so suffix deletion or wholesale truncation —
+        which leave the surviving prefix internally consistent — is also
+        caught.
 
         Returns a dict:
             {"ok": bool, "entries": int, "head_hash": str,
              "broken_at": int|None, "reason": str|None}
-        ``broken_at`` is the 1-based line number of the first bad record.
+        ``broken_at`` is the 1-based line number of the first bad record, or
+        ``None`` when the failure is a head-sidecar mismatch.
         Legacy records written before hash-chaining (no ``record_hash``) are
         reported as ``ok: false`` with reason "unchained legacy record".
         """
+        trusted = self._load_trusted_head()
         if not self.audit_path.exists():
+            if trusted["entries"] > 0 or trusted["head_hash"] != self.GENESIS_HASH:
+                return {"ok": False, "entries": 0, "head_hash": self.GENESIS_HASH,
+                        "broken_at": None,
+                        "reason": f"ledger missing; trusted head expects "
+                                  f"{trusted['entries']} entries"}
             return {"ok": True, "entries": 0, "head_hash": self.GENESIS_HASH,
                     "broken_at": None, "reason": None}
         prev = self.GENESIS_HASH
@@ -188,5 +233,11 @@ class Store:
                             "broken_at": lineno,
                             "reason": "record_hash mismatch (content altered)"}
                 prev = rec["record_hash"]
+        if trusted["head_hash"] != prev or trusted["entries"] != count:
+            return {"ok": False, "entries": count, "head_hash": prev,
+                    "broken_at": None,
+                    "reason": (f"head mismatch: trusted "
+                               f"{trusted['head_hash'][:12]}/{trusted['entries']} "
+                               f"vs ledger {prev[:12]}/{count}")}
         return {"ok": True, "entries": count, "head_hash": prev,
                 "broken_at": None, "reason": None}

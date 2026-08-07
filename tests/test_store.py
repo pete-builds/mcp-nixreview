@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from mcp_nixreview.store import Store
@@ -82,6 +84,64 @@ def test_verify_chain_detects_deletion(tmp_path: Path):
     assert result["ok"] is False
     assert result["broken_at"] == 2
     assert "prev_hash does not link" in result["reason"]
+
+
+def test_concurrent_appends_produce_intact_chain(tmp_path: Path):
+    # Fix 1: without the append lock, two threads read the same last hash and
+    # emit sibling records with identical prev_hash values; verify_chain fails
+    # at the second record with "prev_hash does not link".
+    store = Store(tmp_path)
+    N = 32
+
+    def append(i: int) -> None:
+        store.append_audit({"event": "reviewed", "review_id": f"r{i}"})
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(append, range(N)))
+
+    result = store.verify_chain()
+    assert result["ok"] is True, result
+    assert result["entries"] == N
+    entries = store.read_audit(limit=N)
+    prev_hashes = [e["prev_hash"] for e in entries]
+    assert len(set(prev_hashes)) == N, "sibling records share prev_hash"
+
+
+def test_verify_chain_detects_suffix_deletion(tmp_path: Path):
+    # Fix 2: dropping the tail leaves the remaining chain internally consistent,
+    # so the trusted head sidecar is the only thing that catches it.
+    store = Store(tmp_path)
+    for i in range(3):
+        store.append_audit({"event": "reviewed", "review_id": f"r{i}"})
+    p = tmp_path / "audit.jsonl"
+    lines = p.read_text(encoding="utf-8").splitlines()
+    p.write_text("\n".join(lines[:2]) + "\n", encoding="utf-8")
+    result = store.verify_chain()
+    assert result["ok"] is False
+    assert "head mismatch" in result["reason"]
+    assert result["entries"] == 2
+
+
+def test_verify_chain_detects_wholesale_truncation(tmp_path: Path):
+    # An attacker deletes the whole ledger; the trusted head still records the
+    # expected count so verify_chain must not report ok.
+    store = Store(tmp_path)
+    for i in range(3):
+        store.append_audit({"event": "reviewed", "review_id": f"r{i}"})
+    (tmp_path / "audit.jsonl").unlink()
+    result = store.verify_chain()
+    assert result["ok"] is False
+    assert "ledger missing" in result["reason"]
+
+
+def test_trusted_head_sidecar_written_after_append(tmp_path: Path):
+    store = Store(tmp_path)
+    store.append_audit({"event": "reviewed", "review_id": "r1"})
+    store.append_audit({"event": "reviewed", "review_id": "r2"})
+    head = json.loads((tmp_path / "audit.head.json").read_text(encoding="utf-8"))
+    entries = store.read_audit()
+    assert head["entries"] == 2
+    assert head["head_hash"] == entries[-1]["record_hash"]
 
 
 def test_ledger_never_stores_raw_secrets(tmp_path: Path):
