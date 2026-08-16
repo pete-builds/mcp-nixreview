@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from mcp_nixreview import ADVISORY_NOTICE, ADVISORY_SHORT, __version__
 from mcp_nixreview.clients.kev import KevCache, KevError
@@ -61,6 +63,18 @@ def build_server(
     )
 
     mcp = FastMCP("nixreview")
+
+    @mcp.custom_route("/health", methods=["GET"])
+    async def health_route(_request: Request) -> JSONResponse:
+        """Lightweight liveness endpoint for the Docker HEALTHCHECK.
+
+        A bare GET against ``/mcp`` makes the MCP SDK mint a transport
+        session before it returns 400/405/406, and nothing reaps it, leaking
+        ~40 KB per probe at the standard 30s interval. This route never
+        touches the ``/mcp`` transport, so gate the HEALTHCHECK on the 200
+        status code here, not the body.
+        """
+        return JSONResponse({"status": "ok"})
 
     # ------------------------------------------------------------------
     # 1. review_diff
