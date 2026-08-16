@@ -15,7 +15,7 @@ keywords = ["mcp", "nixos", "security", "cve", "kev", "fastmcp"]
 dependencies = [
     "fastmcp==3.4.7",
     "httpx==0.28.1",
-    "uvicorn==0.52.1",
+    "uvicorn==0.52.2",
     "python-dotenv==1.2.2",
     "pydantic==2.13.4",
     "pydantic-settings==2.15.0",
