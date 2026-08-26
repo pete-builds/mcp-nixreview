@@ -9,6 +9,22 @@ from pathlib import Path
 from mcp_nixreview.store import Store
 
 
+def record_review(store: Store, review_id: str) -> None:
+    """Append a `reviewed` event AND the matching state row, as the server does.
+
+    verify_chain() reconciles reviews.json against a ledger replay, so a test
+    that appends events without ever writing state produces a store that is
+    genuinely inconsistent -- the same shape as a review deleted out of the
+    state file. Tests that are about the CHAIN use this so their fixture is
+    coherent; the tests that are about reconciliation break it on purpose.
+    """
+    store.upsert_review(
+        {"review_id": review_id, "status": "reviewed",
+         "overall_grade": None, "decision": None}
+    )
+    store.append_audit({"event": "reviewed", "review_id": review_id})
+
+
 def test_append_only_ledger(tmp_path: Path):
     store = Store(tmp_path)
     store.append_audit({"event": "reviewed", "review_id": "r1"})
@@ -49,7 +65,7 @@ def test_ledger_is_hash_chained(tmp_path: Path):
 def test_verify_chain_passes_on_intact_ledger(tmp_path: Path):
     store = Store(tmp_path)
     for i in range(3):
-        store.append_audit({"event": "reviewed", "review_id": f"r{i}"})
+        record_review(store, f"r{i}")
     result = store.verify_chain()
     assert result["ok"] is True
     assert result["entries"] == 3
@@ -94,7 +110,7 @@ def test_concurrent_appends_produce_intact_chain(tmp_path: Path):
     N = 32
 
     def append(i: int) -> None:
-        store.append_audit({"event": "reviewed", "review_id": f"r{i}"})
+        record_review(store, f"r{i}")
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(append, range(N)))

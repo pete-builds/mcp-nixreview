@@ -9,7 +9,7 @@
 
 1. **Grades the security-relevant option deltas** in the diff (HIGH / MED / LOW): opened firewall ports, loosened SSH login, new `wheel`/sudo membership, passwordless sudo, disabled `fail2ban`, services bound to `0.0.0.0`.
 2. **Attests the resulting closure** for known vulnerabilities by wrapping [`vulnix`](https://github.com/nix-community/vulnix) and joining the CVE IDs against a cached [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) catalog. Any KEV match escalates to HIGH.
-3. **Gates on a human decision** and writes an **append-only, hash-chained (tamper-evident) audit ledger** of every change, grade, KEV hit, and decision.
+3. **Gates on a human decision** and writes an **append-only, hash-chained audit ledger** of every change, grade, KEV hit, and decision. Anchor it before treating it as proof of what was approved: see [the audit ledger](#the-audit-ledger-and-what-the-chain-actually-proves).
 
 Its novel primitive is a **semantic, security-aware risk grade of a NixOS option delta, fused with a CVE/KEV attestation of the closure it would build**, behind a human gate with a verifiable ledger.
 
@@ -61,7 +61,8 @@ Every tool response carries an `advisory` banner (and the review tools a longer 
 | CVE scanning | Wraps `vulnix` (coarse NVD name-matching) | Missing/spurious CVE matches both possible. |
 | KEV feed | Cached CISA catalog; reports stale/failed fetch | Attestation is only as fresh as the last successful fetch. |
 | Authentication | **None** on the MCP endpoint | Must be run behind trusted access (see below). |
-| Audit ledger | Local file, append-only, **hash-chained (tamper-evident)** | Detects tampering; does not prevent a local writer from altering the file. Not signed. |
+| Audit ledger | Local file, append-only, hash-chained | Unanchored by default, and that is weaker than "tamper-evident" sounds: see below. Anchor it with `LEDGER_KEY` or `expected_head`. |
+| Review state | `reviews.json`, plain JSON, no chain | This is the file every tool reads to answer "is this approved?". `verify_ledger()` reconciles it against a ledger replay. |
 | Apply | Never applies changes | Hand-off to an ops layer is out of scope. |
 
 ### Network exposure
@@ -105,9 +106,31 @@ Every tool returns a JSON string using a standard contract: success is `{"data":
 
 The grading policy lives in [`src/mcp_nixreview/review/diff.py`](src/mcp_nixreview/review/diff.py) and is pinned by tests.
 
-### The audit ledger is tamper-evident
+### The audit ledger, and what the chain actually proves
 
-Each `audit.jsonl` line carries a `prev_hash` and a `record_hash` (sha256 over the record's content plus the previous record's hash). `verify_ledger()` recomputes the whole chain and flags the first record that was edited, deleted, or reordered. This is tamper-**evident**, not tamper-**proof**: a process with write access can still alter the file, but not without breaking the chain, and not without also matching any head hash you recorded elsewhere. Signing is a possible future addition.
+Each `audit.jsonl` line carries a `prev_hash` and a `record_hash` (sha256 over the record's content plus the previous record's hash). `verify_ledger()` recomputes the whole chain and flags the first record that was edited, deleted, or reordered.
+
+**On its own, that does not detect a deliberate forgery, and this section used to say it did.** Two reviewers demonstrated the gap by flipping a rejection into an approval by a named human and getting a clean verdict; one rebuilt the forgery from the recipe in this README without using any of the server's code. The reasons are structural: the hash is unkeyed and its recipe is public, and `audit.head.json`, the sidecar meant to catch a rewrite, sits in the same directory as the ledger it polices with the same permissions. So anyone who can write those two files can edit a past entry, recompute every hash after it, rewrite the sidecar, and pass.
+
+The counterargument is that such an attacker could simply delete the ledger, and deleting both files also passes. True, and not equivalent. A wiped ledger reports zero entries, and nobody reads an empty approval log as "nothing ever happened" -- they start an incident. A forged ledger reports a complete, plausible history in which a dangerous change was approved by a specific person. **Destruction announces itself. Forgery manufactures evidence.**
+
+`verify_ledger()` now reports this in `anchor`, which is the field to read before believing the rest:
+
+| `anchor` | Meaning |
+|---|---|
+| `"none"` | The chain is self-consistent and nothing more. `anchor_note` says so in words. This is the default. |
+| `"hmac"` | `LEDGER_KEY` is set and the sidecar's HMAC verified. Stops a writer who can reach the volume but not this process's environment: a shared or bind-mounted volume, a backup, a sibling container. It does **not** stop code execution inside this container, which can read the key. |
+| `"expected_head"` | You passed `verify_ledger(expected_head=...)` with a head hash recorded somewhere else entirely, and it matched. The strongest of the three, because nothing running in this container can defeat it. |
+
+Set `LEDGER_KEY` in the environment. Never in a file under `data_dir` -- that would put the secret in the directory it exists to protect, which is the mistake the plain sidecar already makes.
+
+### The chain protects the history; `reviews.json` is what tools read
+
+Approval state lives in `reviews.json`, ordinary JSON with no chain. Every tool answering "is this approved?" reads that file, not the ledger. Editing one word in it used to flip a rejection to an approval for every consumer while `verify_ledger()` returned a byte-identical clean result, because it never opened the file.
+
+It now replays the ledger and reports disagreements in `state`, covering `status`, `overall_grade`, `decision`, and `approver`, in both directions: a review present in one file and missing from the other is a mismatch too, since deleting a review from the state file hides it from every consumer just as effectively.
+
+`state.unverifiable` names what replay cannot check. The findings list exists **only** in `reviews.json` and is not in the ledger at all, so the ledger cannot be the source of truth for it even in principle. A clean `state.ok` is not full coverage and does not claim to be.
 
 ---
 
