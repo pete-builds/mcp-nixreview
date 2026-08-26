@@ -34,6 +34,23 @@ class Settings(BaseSettings):
         default="/data",
         description="Directory for the audit ledger, review store, and KEV cache.",
     )
+    ledger_key: str = Field(
+        default="",
+        description=(
+            "Optional HMAC key signing the audit ledger's head sidecar. Empty "
+            "(the default) leaves the ledger self-consistent but unanchored: "
+            "the record hash is unkeyed and its recipe is published, and the "
+            "sidecar sits in the same directory as the ledger it polices, so "
+            "anyone who can write that directory can forge a clean history. "
+            "Setting this stops a writer who can reach the VOLUME but not this "
+            "process's environment -- a shared or bind-mounted volume, a "
+            "backup, a sibling container. It does NOT stop code execution "
+            "inside this container, which can read the key; for that, record "
+            "the head hash elsewhere and pass it to verify_ledger as "
+            "expected_head. Provide it via the environment, never a file under "
+            "data_dir."
+        ),
+    )
 
     # ------------------------------------------------------------------
     # CISA KEV feed

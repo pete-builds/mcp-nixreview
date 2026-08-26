@@ -31,6 +31,60 @@ logger = logging.getLogger("mcp_nixreview.server")
 _MAX_INLINE_CONFIG_BYTES = 512 * 1024  # 512 KiB guard on inline config text
 
 
+# --- Tool annotations ---
+# Nothing in an MCP manifest distinguishes `approve` from `list_reviews` unless
+# the tool says so. On this server that distinction is the whole point: approve
+# writes a human decision into an append-only ledger whose entire purpose is to
+# be cited later as evidence of what was authorised.
+#
+# Nothing here is destructive. This server never applies a change and has no
+# delete path, which is a deliberate design property worth DECLARING rather
+# than leaving a client to infer from the absence of a scary-sounding name.
+#
+# openWorldHint is set per tool rather than uniformly, because on this server
+# it genuinely varies: most tools only touch files under data_dir, while
+# attest_closure shells out to vulnix and consults the CISA KEV feed, and
+# refresh_kev_cache exists to fetch that feed. Marking the local ones
+# open-world would be the easy uniform answer and would misdescribe six of the
+# eight.
+
+#: Reads only, and stays inside this process and its data directory.
+READ_LOCAL = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": False,
+}
+
+#: Writes durable state and appends to the ledger, without leaving the host.
+#: Not idempotent: every call appends another audit record, and the ledger's
+#: value comes from being a faithful account of what happened -- including a
+#: decision that was made twice.
+RECORD_LOCAL = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": False,
+    "openWorldHint": False,
+}
+
+#: Same, but reaches outside: vulnix against the Nix store, and the KEV feed.
+RECORD_REMOTE = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": False,
+    "openWorldHint": True,
+}
+
+#: Refreshes a local cache from an upstream feed. Repeating it converges on
+#: the same cache, so unlike the record-writing tools this one is idempotent.
+REFRESH = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": True,
+}
+
+
 def _ok(data: Any) -> str:
     # Every success response carries a short, unavoidable advisory banner.
     if isinstance(data, dict) and "advisory" not in data:
@@ -55,7 +109,11 @@ def build_server(
     store: Store | None = None,
     kev: KevCache | None = None,
 ) -> FastMCP:
-    store = store or Store(settings.data_dir, timezone=settings.timezone)
+    store = store or Store(
+        settings.data_dir,
+        timezone=settings.timezone,
+        ledger_key=settings.ledger_key,
+    )
     kev = kev or KevCache(
         settings.kev_url,
         Path(settings.data_dir) / "kev_cache.json",
@@ -79,7 +137,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 1. review_diff
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=RECORD_LOCAL)
     async def review_diff(config_ref: str, ref_type: str = "auto") -> str:
         """Grade a proposed NixOS config change for security-relevant deltas.
 
@@ -185,7 +243,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 2. attest_closure
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=RECORD_REMOTE)
     async def attest_closure(drv_or_path: str, review_id: str = "") -> str:
         """Attest a built NixOS closure against CVEs + the CISA KEV catalog.
 
@@ -292,7 +350,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 3. request_approval
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=RECORD_LOCAL)
     async def request_approval(review_id: str) -> str:
         """Mark a reviewed change as pending human approval.
 
@@ -336,7 +394,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 4. approve
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=RECORD_LOCAL)
     async def approve(
         review_id: str, approver: str = "", decision: str = "approve", note: str = ""
     ) -> str:
@@ -403,7 +461,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 5. list_reviews
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=READ_LOCAL)
     async def list_reviews(status: str = "", limit: int = 20) -> str:
         """List reviews, most recent first.
 
@@ -440,7 +498,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 6. get_audit_log
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=READ_LOCAL)
     async def get_audit_log(review_id: str = "", limit: int = 50) -> str:
         """Read the append-only, hash-chained audit ledger (audit.jsonl).
 
@@ -470,29 +528,69 @@ def build_server(
     # ------------------------------------------------------------------
     # 7. verify_ledger
     # ------------------------------------------------------------------
-    @mcp.tool()
-    async def verify_ledger() -> str:
-        """Verify the audit ledger's hash chain is intact (tamper-evidence).
+    @mcp.tool(annotations=READ_LOCAL)
+    async def verify_ledger(expected_head: str = "") -> str:
+        """Check the audit ledger, its head sidecar, and the state file tools read.
 
-        The ledger (audit.jsonl) is append-only AND hash-chained: each record
-        carries prev_hash + record_hash. This tool recomputes the whole chain
-        and reports whether any record was edited, deleted, or reordered. It is
-        tamper-EVIDENT, not tamper-proof: a local writer can still alter the
-        file, but not without breaking the chain this check detects.
+        Three checks, reported separately because they mean different things.
 
-        Args: none. Read-only, idempotent.
+        1. The chain. audit.jsonl is append-only and hash-chained (each record
+           carries prev_hash + record_hash). This recomputes the whole chain
+           and reports any record edited, deleted, or reordered, then
+           cross-checks the walked result against the head sidecar so a
+           truncation is caught too.
+
+        2. The anchor, in ``anchor``. This is the field to read before
+           believing the rest, and it replaces a claim that used to be made
+           here and was false. This tool previously said a local writer "can
+           still alter the file, but not without breaking the chain this check
+           detects". Two reviewers disproved that by flipping a rejection into
+           an approval by a named human and getting a clean verdict, one of
+           them rebuilding the forgery from the published recipe without using
+           any of this server's code. The hash is unkeyed, and the sidecar that
+           is meant to catch a rewrite lives in the same directory, with the
+           same permissions, as the ledger it polices.
+
+           So ``anchor: "none"`` means the chain is self-consistent and nothing
+           more, and ``anchor_note`` says so in words. ``anchor: "hmac"`` means
+           a signing key outside data_dir verified the sidecar, which stops a
+           writer who can reach the volume but not this process's environment.
+           ``anchor: "expected_head"`` means you passed a head hash recorded
+           somewhere else entirely and it matched; that is the strongest,
+           because nothing running in this container can defeat it.
+
+        3. The state file, in ``state``. The chain protects audit.jsonl, but
+           every tool answering "is this approved?" reads reviews.json, which
+           is ordinary unprotected JSON. Editing one word there used to flip a
+           rejection to an approval for every reader while this tool returned a
+           byte-identical clean result, because it never opened the file. It
+           now replays the ledger and reports disagreements. ``unverifiable``
+           lists what replay cannot check: the findings list exists ONLY in
+           reviews.json and is not in the ledger at all, so no amount of
+           replaying can vouch for it.
+
+        ``ok`` is the conjunction of all three.
+
+        Args:
+            expected_head: Optional. A head_hash you recorded outside this
+                container on a previous run. Supplying it is the only check
+                here that an attacker with code execution in this container
+                cannot defeat.
+
+        Read-only, idempotent.
 
         Returns:
             Success: {"data": {"ok": bool, "entries": int, "head_hash": str,
-                "broken_at": int|null, "reason": str|null}}. ``ok: true`` means
-            the chain verifies; ``broken_at`` is the 1-based line of the first
-            bad record when ``ok`` is false.
+                "broken_at": int|null, "reason": str|null, "anchor": str,
+                "anchor_note": str|null, "state": {"ok", "checked",
+                "mismatches", "unverifiable"}}}. ``broken_at`` is the 1-based
+            line of the first bad record when the failure is a per-record one.
 
         Example:
-            verify_ledger()
+            verify_ledger(expected_head="a1b2c3...")
         """
         try:
-            return _ok(store.verify_chain())
+            return _ok(store.verify_chain(expected_head=expected_head.strip()))
         except Exception as exc:  # noqa: BLE001
             logger.exception("verify_ledger failed")
             return _err(f"unexpected error: {exc}", "INTERNAL")
@@ -500,7 +598,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 8. refresh_kev_cache
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=REFRESH)
     async def refresh_kev_cache() -> str:
         """Fetch the live CISA KEV catalog and refresh the local cache.
 
