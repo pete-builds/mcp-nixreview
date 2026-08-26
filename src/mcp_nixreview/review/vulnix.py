@@ -131,9 +131,39 @@ async def attest(path: str) -> VulnixResult:
             degraded_reason=f"failed to execute vulnix: {exc}", source="vulnix",
         )
 
-    # vulnix exits non-zero (2) when it finds vulnerabilities; that's expected.
+    # vulnix exits 2 when it finds vulnerabilities, which is a SUCCESSFUL scan and
+    # must keep working. Any other non-zero exit is a failed scan, and the two were
+    # previously collapsed: the exit code was never read at all, and empty stdout
+    # was coerced to "[]" by the `or` below, so a crashed, db-locked or
+    # misconfigured vulnix produced available=True with zero CVEs. That response
+    # was byte-identical to a genuinely clean closure -- there was no field a
+    # caller could use to tell them apart -- and it graded LOW.
+    #
+    # The check keys on "no usable output" rather than on the exit code alone,
+    # because exit 2 with valid JSON is the legitimate finding-vulnerabilities
+    # case and must not be caught here.
+    stdout_text = stdout.decode("utf-8").strip()
+    if proc.returncode not in (0, 2) and not stdout_text:
+        return VulnixResult(
+            available=False, cve_ids=[], items=[],
+            degraded_reason=(
+                f"vulnix exited {proc.returncode} with no output "
+                f"(stderr: {stderr.decode('utf-8', 'replace')[:300]})"
+            ),
+            source="vulnix",
+        )
+    if not stdout_text:
+        return VulnixResult(
+            available=False, cve_ids=[], items=[],
+            degraded_reason=(
+                f"vulnix produced no output (exit {proc.returncode}; "
+                f"stderr: {stderr.decode('utf-8', 'replace')[:300]})"
+            ),
+            source="vulnix",
+        )
+
     try:
-        raw = json.loads(stdout.decode("utf-8") or "[]")
+        raw = json.loads(stdout_text)
     except json.JSONDecodeError:
         return VulnixResult(
             available=False, cve_ids=[], items=[],
