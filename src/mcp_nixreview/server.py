@@ -31,6 +31,60 @@ logger = logging.getLogger("mcp_nixreview.server")
 _MAX_INLINE_CONFIG_BYTES = 512 * 1024  # 512 KiB guard on inline config text
 
 
+# --- Tool annotations ---
+# Nothing in an MCP manifest distinguishes `approve` from `list_reviews` unless
+# the tool says so. On this server that distinction is the whole point: approve
+# writes a human decision into an append-only ledger whose entire purpose is to
+# be cited later as evidence of what was authorised.
+#
+# Nothing here is destructive. This server never applies a change and has no
+# delete path, which is a deliberate design property worth DECLARING rather
+# than leaving a client to infer from the absence of a scary-sounding name.
+#
+# openWorldHint is set per tool rather than uniformly, because on this server
+# it genuinely varies: most tools only touch files under data_dir, while
+# attest_closure shells out to vulnix and consults the CISA KEV feed, and
+# refresh_kev_cache exists to fetch that feed. Marking the local ones
+# open-world would be the easy uniform answer and would misdescribe six of the
+# eight.
+
+#: Reads only, and stays inside this process and its data directory.
+READ_LOCAL = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": False,
+}
+
+#: Writes durable state and appends to the ledger, without leaving the host.
+#: Not idempotent: every call appends another audit record, and the ledger's
+#: value comes from being a faithful account of what happened -- including a
+#: decision that was made twice.
+RECORD_LOCAL = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": False,
+    "openWorldHint": False,
+}
+
+#: Same, but reaches outside: vulnix against the Nix store, and the KEV feed.
+RECORD_REMOTE = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": False,
+    "openWorldHint": True,
+}
+
+#: Refreshes a local cache from an upstream feed. Repeating it converges on
+#: the same cache, so unlike the record-writing tools this one is idempotent.
+REFRESH = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": True,
+}
+
+
 def _ok(data: Any) -> str:
     # Every success response carries a short, unavoidable advisory banner.
     if isinstance(data, dict) and "advisory" not in data:
@@ -83,7 +137,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 1. review_diff
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=RECORD_LOCAL)
     async def review_diff(config_ref: str, ref_type: str = "auto") -> str:
         """Grade a proposed NixOS config change for security-relevant deltas.
 
@@ -189,7 +243,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 2. attest_closure
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=RECORD_REMOTE)
     async def attest_closure(drv_or_path: str, review_id: str = "") -> str:
         """Attest a built NixOS closure against CVEs + the CISA KEV catalog.
 
@@ -296,7 +350,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 3. request_approval
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=RECORD_LOCAL)
     async def request_approval(review_id: str) -> str:
         """Mark a reviewed change as pending human approval.
 
@@ -340,7 +394,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 4. approve
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=RECORD_LOCAL)
     async def approve(
         review_id: str, approver: str = "", decision: str = "approve", note: str = ""
     ) -> str:
@@ -407,7 +461,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 5. list_reviews
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=READ_LOCAL)
     async def list_reviews(status: str = "", limit: int = 20) -> str:
         """List reviews, most recent first.
 
@@ -444,7 +498,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 6. get_audit_log
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=READ_LOCAL)
     async def get_audit_log(review_id: str = "", limit: int = 50) -> str:
         """Read the append-only, hash-chained audit ledger (audit.jsonl).
 
@@ -474,7 +528,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 7. verify_ledger
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=READ_LOCAL)
     async def verify_ledger(expected_head: str = "") -> str:
         """Check the audit ledger, its head sidecar, and the state file tools read.
 
@@ -544,7 +598,7 @@ def build_server(
     # ------------------------------------------------------------------
     # 8. refresh_kev_cache
     # ------------------------------------------------------------------
-    @mcp.tool()
+    @mcp.tool(annotations=REFRESH)
     async def refresh_kev_cache() -> str:
         """Fetch the live CISA KEV catalog and refresh the local cache.
 
