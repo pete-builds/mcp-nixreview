@@ -124,6 +124,14 @@ The counterargument is that such an attacker could simply delete the ledger, and
 
 Set `LEDGER_KEY` in the environment. Never in a file under `data_dir` -- that would put the secret in the directory it exists to protect, which is the mistake the plain sidecar already makes.
 
+**Adding a key to a ledger that never had one is a one-time operator step, not automatic.** With `LEDGER_KEY` set, the server refuses to extend a ledger whose head sidecar carries no MAC (or a MAC that does not verify, or a head that is not the last line), and the tool returns an `INTERNAL` error instead of writing. It used to sign whatever head it found on the next append, which meant a writer who could rewrite the ledger only had to drop an unsigned sidecar and wait for the next review to get a valid MAC on the forgery. To roll a key out on an existing ledger: record the `head_hash` from a `verify_ledger()` result you trust **before** setting the key, then run once inside the container:
+
+```
+python -m mcp_nixreview.adopt --expected-head <that hash>
+```
+
+`--force` adopts without the head check and is logged as forced. Adoption refuses a sidecar carrying a wrong MAC (that is a rewrite, not a legacy ledger) and a chain that does not verify.
+
 ### The chain protects the history; `reviews.json` is what tools read
 
 Approval state lives in `reviews.json`, ordinary JSON with no chain. Every tool answering "is this approved?" reads that file, not the ledger. Editing one word in it used to flip a rejection to an approval for every consumer while `verify_ledger()` returned a byte-identical clean result, because it never opened the file.
