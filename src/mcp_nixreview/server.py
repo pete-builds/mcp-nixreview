@@ -21,6 +21,7 @@ from starlette.responses import JSONResponse
 from mcp_nixreview import ADVISORY_NOTICE, ADVISORY_SHORT, __version__
 from mcp_nixreview.clients.kev import KevCache, KevError
 from mcp_nixreview.config import Settings, load_settings
+from mcp_nixreview.grades import grade_rank
 from mcp_nixreview.logging_setup import configure_logging
 from mcp_nixreview.review import diff as diffmod
 from mcp_nixreview.review import vulnix as vulnixmod
@@ -100,7 +101,8 @@ def _err(message: str, code: str, **details: Any) -> str:
 
 
 def _grade_rank(grade: str) -> int:
-    return {"HIGH": 3, "MED": 2, "LOW": 1}.get(grade, 0)
+    # One table for the writer and the replayer; see mcp_nixreview.grades.
+    return grade_rank(grade)
 
 
 def build_server(

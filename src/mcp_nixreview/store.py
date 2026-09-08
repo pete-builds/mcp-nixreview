@@ -65,26 +65,27 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from mcp_nixreview.grades import grade_outranks
+
 logger = logging.getLogger("mcp_nixreview.store")
 
-#: Grade ordering, lowest first. Kept here rather than imported from the
-#: server so replay does not depend on the module that writes the events.
-_GRADE_ORDER = ("NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL")
+# Grade ranking lives in mcp_nixreview.grades so the writer (server) and the
+# replayer (here) can never disagree on a spelling again. Replay still does not
+# import the server module: grades.py holds constants and nothing else.
+_grade_outranks = grade_outranks
 
 
-def _grade_outranks(candidate: str | None, current: str | None) -> bool:
-    """True when ``candidate`` is a strictly higher grade than ``current``.
+class LedgerIntegrityError(RuntimeError):
+    """The keyed ledger on disk cannot be vouched for, so it will not be extended.
 
-    An unknown grade string ranks lowest, so a record carrying something this
-    version does not recognise can never silently escalate a replay.
+    Raised by :meth:`Store.append_audit` when a signing key is configured and
+    the head sidecar is missing its MAC, carries a MAC that does not verify,
+    or names a head that is not the last line of the ledger; and by
+    :meth:`Store._last_hash` when a keyed ledger holds a malformed or unhashed
+    line. Tools surface it as an ``INTERNAL`` error envelope. The operator's
+    way forward is :meth:`Store.adopt_unsigned_ledger` for a genuine key
+    rollout, or restoring the ledger from a trusted copy for anything else.
     """
-    def rank(value: str | None) -> int:
-        try:
-            return _GRADE_ORDER.index(value or "NONE")
-        except ValueError:
-            return 0
-
-    return rank(candidate) > rank(current)
 
 
 class Store:
@@ -196,20 +197,38 @@ class Store:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _last_hash(self) -> str:
-        """Return the record_hash of the last ledger line, or GENESIS if empty."""
+        """Return the record_hash of the last ledger line, or GENESIS if empty.
+
+        Unkeyed, a malformed or unhashed line is skipped and the chain
+        continues from the last good hash (legacy behaviour; verify_chain still
+        reports the bad line). Keyed, that leniency would let a corrupt or
+        edited ledger be extended and then signed, so it raises instead.
+        """
         if not self.audit_path.exists():
             return self.GENESIS_HASH
         last = self.GENESIS_HASH
         with self.audit_path.open("r", encoding="utf-8") as fh:
-            for line in fh:
+            for lineno, line in enumerate(fh, start=1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
+                    if self.signing_enabled:
+                        raise LedgerIntegrityError(
+                            f"ledger line {lineno} is not valid JSON; refusing to "
+                            "extend a keyed ledger past a corrupt record"
+                        ) from None
                     continue
-                last = rec.get("record_hash", last)
+                if "record_hash" not in rec:
+                    if self.signing_enabled:
+                        raise LedgerIntegrityError(
+                            f"ledger line {lineno} carries no record_hash; refusing "
+                            "to extend a keyed ledger past an unchained record"
+                        )
+                    continue
+                last = rec["record_hash"]
         return last
 
     @property
@@ -262,6 +281,7 @@ class Store:
             try:
                 trusted = self._load_trusted_head()
                 prev_hash = self._last_hash()
+                self._require_appendable(trusted, prev_hash)
                 content = {"ts": self.now_iso(), **event}
                 record = {**content, "prev_hash": prev_hash}
                 record["record_hash"] = self._record_hash(content, prev_hash)
@@ -271,6 +291,110 @@ class Store:
                 self._save_trusted_head(record["record_hash"], trusted["entries"] + 1)
             finally:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+    def _require_appendable(self, trusted: dict, prev_hash: str) -> None:
+        """Refuse to extend a keyed ledger the sidecar does not vouch for.
+
+        Before this check existed, ``append_audit`` signed whatever head it
+        found on disk. An attacker with volume write access could rewrite a
+        rejection into an approval using the published hash recipe, drop an
+        unsigned sidecar, and wait: the server's next unrelated event signed
+        the forged chain and every later ``verify_ledger`` said ``ok``. The
+        signing key exists to stop exactly that writer, so the key must never
+        be applied to a head it did not produce.
+
+        Unkeyed stores are unchanged: they never claimed more than
+        self-consistency. A brand-new keyed ledger (no sidecar file, no lines)
+        is allowed its first write.
+        """
+        if not self.signing_enabled:
+            return
+        fresh = (
+            not self.head_path.exists()
+            and trusted["entries"] == 0
+            and prev_hash == self.GENESIS_HASH
+        )
+        if fresh:
+            return
+        stored_mac = trusted.get("head_mac", "")
+        if not stored_mac:
+            raise LedgerIntegrityError(
+                "a signing key is configured but the head sidecar carries no MAC; "
+                "refusing to sign a head this key did not produce. If this ledger "
+                "predates the key, run adopt_unsigned_ledger once with the head "
+                "hash recorded from a verify you trust"
+            )
+        expected_mac = self._head_mac(trusted["head_hash"], trusted["entries"])
+        if not hmac.compare_digest(stored_mac, expected_mac):
+            raise LedgerIntegrityError(
+                "head sidecar MAC does not verify against the signing key; "
+                "refusing to extend a ledger that may have been rewritten"
+            )
+        if trusted["head_hash"] != prev_hash:
+            raise LedgerIntegrityError(
+                "head sidecar does not name the last ledger line; refusing to "
+                "extend a ledger whose tail differs from the signed head"
+            )
+
+    def adopt_unsigned_ledger(self, expected_head: str = "", force: bool = False) -> dict:
+        """One-time operator step: sign a ledger that never had a key.
+
+        The genuine key-rollout case, kept deliberately separate from
+        ``append_audit`` so it can never happen as a side effect. Requires a
+        self-consistent chain and a sidecar with NO MAC (a wrong MAC is
+        tampering, not legacy, and is refused even with ``force``). Requires
+        ``expected_head``, the head hash the operator recorded from a verify
+        they trust, because the chain being self-consistent proves nothing
+        about a ledger nobody has anchored yet; ``force=True`` skips that
+        check and says so in the returned dict.
+
+        Returns ``{"adopted", "head_hash", "entries", "forced"}``.
+        """
+        if not self.signing_enabled:
+            raise LedgerIntegrityError("no signing key is configured; nothing to adopt")
+        trusted = self._load_trusted_head()
+        if trusted.get("head_mac"):
+            expected_mac = self._head_mac(trusted["head_hash"], trusted["entries"])
+            if hmac.compare_digest(trusted["head_mac"], expected_mac):
+                return {"adopted": False, "head_hash": trusted["head_hash"],
+                        "entries": trusted["entries"], "forced": False,
+                        "reason": "already signed by this key"}
+            raise LedgerIntegrityError(
+                "head sidecar carries a MAC that does not verify; that is a "
+                "rewrite, not an unsigned legacy ledger, and adoption refuses it"
+            )
+        walk = self._walk_chain()
+        if not walk["ok"]:
+            raise LedgerIntegrityError(
+                f"ledger chain is not self-consistent ({walk['reason']}); "
+                "restore it before adopting"
+            )
+        if expected_head:
+            if expected_head.strip().lower() != walk["head_hash"].lower():
+                raise LedgerIntegrityError(
+                    f"expected_head {expected_head.strip()[:12]} does not match the "
+                    f"ledger head {walk['head_hash'][:12]}; not adopting"
+                )
+        elif not force:
+            raise LedgerIntegrityError(
+                "adoption needs expected_head, the head hash you recorded from a "
+                "verify_ledger result you trust, or force=True to adopt whatever "
+                "is on disk knowing nothing has anchored it"
+            )
+        self.audit_path.touch(exist_ok=True)
+        with self.audit_path.open("a", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                self._save_trusted_head(walk["head_hash"], walk["entries"])
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        logger.warning(
+            "ledger adopted under signing key",
+            extra={"head_hash": walk["head_hash"], "entries": walk["entries"],
+                   "forced": bool(force and not expected_head)},
+        )
+        return {"adopted": True, "head_hash": walk["head_hash"],
+                "entries": walk["entries"], "forced": bool(force and not expected_head)}
 
     def read_audit(self, review_id: str = "", limit: int = 50) -> list[dict]:
         if not self.audit_path.exists():
@@ -288,7 +412,11 @@ class Store:
                 if review_id and rec.get("review_id") != review_id:
                     continue
                 entries.append(rec)
-        return entries[-max(0, limit):]
+        # ``entries[-0:]`` is the whole list, so zero (or less) is handled
+        # explicitly rather than through the slice.
+        if limit <= 0:
+            return []
+        return entries[-limit:]
 
     # -- reconciliation: does reviews.json still match the ledger? ---------
 

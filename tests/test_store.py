@@ -168,3 +168,15 @@ def test_ledger_never_stores_raw_secrets(tmp_path: Path):
     raw = (tmp_path / "audit.jsonl").read_text(encoding="utf-8")
     assert "password" not in raw.lower()
     assert "authorization" not in raw.lower()
+
+
+def test_read_audit_limit_zero_or_negative_returns_nothing(tmp_path: Path):
+    """``entries[-0:]`` is the whole list. A caller asking for zero entries
+    (or a negative number) must get zero, not the entire ledger."""
+    store = Store(tmp_path)
+    for i in range(3):
+        store.append_audit({"event": "reviewed", "review_id": f"r{i}", "overall_grade": "LOW"})
+    assert store.read_audit(limit=0) == []
+    assert store.read_audit(limit=-5) == []
+    assert len(store.read_audit(limit=2)) == 2
+    assert len(store.read_audit(limit=50)) == 3

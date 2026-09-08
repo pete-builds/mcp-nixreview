@@ -16,7 +16,9 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from mcp_nixreview.store import Store
+import pytest
+
+from mcp_nixreview.store import LedgerIntegrityError, Store
 
 KEY = "a-key-that-does-not-live-in-data-dir"
 
@@ -146,7 +148,12 @@ def test_expected_head_catches_what_an_in_container_attacker_cannot(tmp_path: Pa
 
 
 def test_a_signing_key_with_an_unsigned_sidecar_fails_rather_than_guessing(tmp_path: Path):
-    """Cannot be told apart from a sidecar swapped by a writer without the key."""
+    """Cannot be told apart from a sidecar swapped by a writer without the key.
+
+    And it stays that way: the next append must NOT quietly sign whatever is on
+    disk. That "recovery" was the laundering path, so it is now a refusal, and
+    the genuine key-rollout case goes through an explicit operator step.
+    """
     unsigned = Store(tmp_path)
     _reject(unsigned)
 
@@ -155,12 +162,102 @@ def test_a_signing_key_with_an_unsigned_sidecar_fails_rather_than_guessing(tmp_p
     assert result["ok"] is False
     assert "no MAC" in result["reason"]
 
-    # One legitimate append signs the head, and it recovers.
+    with pytest.raises(LedgerIntegrityError):
+        signed.append_audit({"event": "reviewed", "review_id": "r2",
+                             "overall_grade": "LOW"})
+    # Nothing was written, nothing was signed.
+    assert signed.verify_chain()["ok"] is False
+    assert len(signed.read_audit(limit=Store.ALL_ENTRIES)) == 2
+
+
+def test_a_forged_ledger_is_not_laundered_by_the_next_legitimate_append(tmp_path: Path):
+    """The finding: rewrite history, drop an unsigned sidecar, wait for the
+    server to write its next event, and the forged chain comes out signed."""
+    store = Store(tmp_path, ledger_key=KEY)
+    _reject(store)
+    assert store.verify_chain()["anchor"] == "hmac"
+
+    _forge_ledger(tmp_path)
+    _forge_state(store)
+    assert store.verify_chain()["ok"] is False
+
+    with pytest.raises(LedgerIntegrityError):
+        store.append_audit({"event": "reviewed", "review_id": "r9",
+                            "overall_grade": "LOW"})
+
+    after = store.verify_chain()
+    assert after["ok"] is False
+    assert after["anchor"] == "none"
+    # The decision the attacker wanted is still not vouched for.
+    decided = [r for r in store.read_audit(limit=Store.ALL_ENTRIES)
+               if r.get("event") == "decided"]
+    assert decided[0]["decision"] == "approve"  # the forgery is on disk...
+    assert store.verify_chain()["ok"] is False   # ...and the server says so.
+
+
+def test_a_fresh_keyed_store_can_write_its_first_event(tmp_path: Path):
+    """The refusal must not brick a brand-new deployment with a key set."""
+    store = Store(tmp_path, ledger_key=KEY)
+    store.append_audit({"event": "reviewed", "review_id": "r1", "overall_grade": "LOW"})
+    store.append_audit({"event": "decided", "review_id": "r1",
+                        "decision": "approve", "approver": "pete"})
+    result = store.verify_chain()
+    assert result["anchor"] == "hmac"
+    assert result["entries"] == 2
+
+
+def test_adopting_an_unsigned_ledger_is_explicit_and_needs_the_operators_head(tmp_path: Path):
+    """The genuine key rollout: an operator adds a key to a ledger that never
+    had one. That is a decision, taken once, with the head hash they recorded
+    from a verify they trust. Not a side effect of the next review."""
+    unsigned = Store(tmp_path)
+    _reject(unsigned)
+    genuine_head = unsigned.verify_chain()["head_hash"]
+
+    signed = Store(tmp_path, ledger_key=KEY)
+    # No head, no force: refused, with instructions.
+    with pytest.raises(LedgerIntegrityError) as excinfo:
+        signed.adopt_unsigned_ledger()
+    assert "expected_head" in str(excinfo.value)
+    # Wrong head: refused.
+    with pytest.raises(LedgerIntegrityError):
+        signed.adopt_unsigned_ledger(expected_head="0" * 64)
+    assert signed.verify_chain()["ok"] is False
+
+    # Right head: adopted, signed, and appends work again.
+    outcome = signed.adopt_unsigned_ledger(expected_head=genuine_head)
+    assert outcome["adopted"] is True
+    assert signed.verify_chain()["anchor"] == "hmac"
     signed.upsert_review({"review_id": "r2", "status": "reviewed",
                           "overall_grade": "LOW", "decision": None})
-    signed.append_audit({"event": "reviewed", "review_id": "r2",
-                         "overall_grade": "LOW"})
+    signed.append_audit({"event": "reviewed", "review_id": "r2", "overall_grade": "LOW"})
     assert signed.verify_chain()["ok"] is True
+
+
+def test_adoption_refuses_a_sidecar_that_carries_a_wrong_mac(tmp_path: Path):
+    """A wrong MAC is tampering, not a legacy ledger. Adoption is for the
+    latter only, even with the right head in hand."""
+    store = Store(tmp_path, ledger_key=KEY)
+    _reject(store)
+    head = json.loads((tmp_path / "audit.head.json").read_text())
+    head["head_mac"] = "0" * 64
+    (tmp_path / "audit.head.json").write_text(json.dumps(head))
+
+    with pytest.raises(LedgerIntegrityError):
+        store.adopt_unsigned_ledger(expected_head=store.verify_chain()["head_hash"])
+    with pytest.raises(LedgerIntegrityError):
+        store.adopt_unsigned_ledger(force=True)
+
+
+def test_a_keyed_store_refuses_to_extend_a_malformed_ledger(tmp_path: Path):
+    """``_last_hash`` used to skip a corrupt or unhashed line and extend from
+    the last good one, signing the result. With a key, corruption is refused."""
+    store = Store(tmp_path, ledger_key=KEY)
+    _reject(store)
+    with (tmp_path / "audit.jsonl").open("a") as fh:
+        fh.write("{not json\n")
+    with pytest.raises(LedgerIntegrityError):
+        store.append_audit({"event": "reviewed", "review_id": "r2", "overall_grade": "LOW"})
 
 
 # --- 7b: the check must cover the file every tool actually reads ---------
