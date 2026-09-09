@@ -7,7 +7,7 @@ x-logging: &default-logging
 services:
   mcp-nixreview:
     build: .
-    image: mcp-nixreview:0.1.0
+    image: mcp-nixreview:0.1.1
     container_name: mcp-nixreview
     restart: unless-stopped
     read_only: true
