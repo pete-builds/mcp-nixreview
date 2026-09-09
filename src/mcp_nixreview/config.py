@@ -65,6 +65,19 @@ class Settings(BaseSettings):
     kev_fetch_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
 
     # ------------------------------------------------------------------
+    # review_diff file access
+    # ------------------------------------------------------------------
+    review_root: str = Field(
+        default="/review",
+        description=(
+            "The only directory review_diff(ref_type=\"file_path\") may read "
+            "from. Mount the configs to review here. Anything outside it, "
+            "including via \"..\" or a symlink, is refused. Nothing is mounted "
+            "by default, so file_path mode is off until you mount something."
+        ),
+    )
+
+    # ------------------------------------------------------------------
     # Timestamps
     # ------------------------------------------------------------------
     timezone: str = Field(
@@ -86,6 +99,7 @@ class Settings(BaseSettings):
             "data_dir": self.data_dir,
             "kev_url": self.kev_url,
             "kev_ttl_hours": self.kev_ttl_hours,
+            "review_root": self.review_root,
             "timezone": self.timezone,
             "mcp_host": self.mcp_host,
             "mcp_port": self.mcp_port,
