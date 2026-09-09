@@ -9,7 +9,7 @@ append-only, hash-chained (tamper-evident) audit ledger.
 ADVISORY, NOT AUTHORITATIVE. See README for the honest caveats.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # Short, always-present banner for every success response. The long-form
 # ADVISORY_NOTICE below carries the full caveats.
