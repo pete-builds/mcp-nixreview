@@ -83,7 +83,7 @@ It composes with, rather than competes with, the read-only query MCPs (e.g. [`ut
 
 | Tool | What it does |
 |------|--------------|
-| `review_diff(config_ref, ref_type="auto")` | Grade a diff or raw config for security-relevant option changes. Creates a review, writes a ledger entry. No network, no NixOS host needed. |
+| `review_diff(config_ref, ref_type="auto")` | Grade a diff or raw config for security-relevant option changes. Creates a review, writes a ledger entry. No network, no NixOS host needed. Input is text unless `ref_type="file_path"`, and a file is only read from under `REVIEW_ROOT` (default `/review`, nothing mounted by default). |
 | `attest_closure(drv_or_path, review_id="")` | Run `vulnix` on a closure (or parse a `vulnix --json` file) and join CVEs to the cached CISA KEV feed. Degrades honestly if `vulnix` is absent. |
 | `request_approval(review_id)` | Transition a review to `pending_approval`. |
 | `approve(review_id, approver="", decision="approve", note="")` | Record a human decision. **Never applies the change.** |

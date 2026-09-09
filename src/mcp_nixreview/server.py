@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -156,9 +155,14 @@ def build_server(
         Args:
             config_ref: The change to review. Either literal text (a unified
                 diff OR a raw configuration.nix snippet), or a filesystem path
-                to such a file when ref_type="file_path".
-            ref_type: "auto" (default; treats a short existing path as a file,
-                otherwise as literal text), "text", or "file_path".
+                to such a file when ref_type="file_path". A file path is only
+                read from under the server's review_root (default /review);
+                relative paths resolve against it and anything outside it is
+                refused.
+            ref_type: "text" or "file_path". "auto" (the default) is the same
+                as "text": input is never sniffed for a path, so a string that
+                happens to name a file on the server is graded as text, not
+                opened.
 
         Returns:
             Success: {"data": {"review_id", "created_at", "input_kind",
@@ -172,21 +176,33 @@ def build_server(
             review_diff("+  services.openssh.settings.PermitRootLogin = \\"yes\\";")
         """
         try:
+            if ref_type not in ("auto", "text", "file_path"):
+                return _err(
+                    'ref_type must be "text", "file_path", or "auto"', "INVALID_INPUT"
+                )
             text = config_ref
             resolved_from = "text"
-            looks_like_path = (
-                ref_type == "file_path"
-                or (ref_type == "auto" and "\n" not in config_ref
-                    and len(config_ref) < 4096 and os.path.sep in config_ref)
-            )
-            if looks_like_path:
-                p = Path(config_ref)
-                if not p.exists():
-                    if ref_type == "file_path":
-                        return _err(f"file not found: {config_ref}", "NOT_FOUND", path=config_ref)
-                else:
-                    text = p.read_text(encoding="utf-8", errors="replace")
-                    resolved_from = "file_path"
+            if ref_type == "file_path":
+                # Only an explicit file_path opens a file, and only under
+                # review_root. "auto" used to sniff any short string with a
+                # path separator and open it if it existed, which made the
+                # tool a read primitive over every file the process could
+                # see; the matching lines came back verbatim in "snippet".
+                root = Path(settings.review_root).resolve()
+                candidate = Path(config_ref)
+                if not candidate.is_absolute():
+                    candidate = root / candidate
+                resolved = candidate.resolve()
+                if resolved != root and root not in resolved.parents:
+                    return _err(
+                        f"file_path must be under review_root ({settings.review_root})",
+                        "INVALID_INPUT",
+                        path=config_ref,
+                    )
+                if not resolved.is_file():
+                    return _err(f"file not found: {config_ref}", "NOT_FOUND", path=config_ref)
+                text = resolved.read_text(encoding="utf-8", errors="replace")
+                resolved_from = "file_path"
 
             if not text.strip():
                 return _err("config_ref is empty", "INVALID_INPUT")
@@ -282,18 +298,37 @@ def build_server(
 
             kev_matches: list[dict] = []
             kev_feed: dict = kev.status()
+            # False only when there were CVEs to check and no KEV catalog at
+            # all (fetch failed, no cache). Then kev_match_count is unchecked,
+            # not zero, and the grade must say so rather than land on MED,
+            # which is the grade for "checked, none known-exploited".
+            kev_checked = True
+            kev_degraded_reason: str | None = None
             if result.cve_ids:
                 try:
-                    await kev.ensure_fresh(settings.kev_ttl_hours)
+                    cache = await kev.ensure_fresh(settings.kev_ttl_hours)
                     kev_feed = kev.status()
+                    kev_feed["stale"] = bool(cache.get("stale"))
+                    if kev_feed["stale"]:
+                        kev_degraded_reason = (
+                            "KEV feed refresh failed; matched against a stale cache "
+                            f"({kev_feed.get('age_hours')} hours old)"
+                        )
                 except KevError as exc:
-                    kev_feed = {"available": False, "error": str(exc)}
+                    kev_feed = {"available": False, "stale": None, "error": str(exc)}
+                    kev_checked = False
+                    kev_degraded_reason = (
+                        "KEV feed unavailable and no cache: kev_match_count is "
+                        "unchecked, not zero"
+                    )
                 kev_matches = kev.lookup(result.cve_ids)
 
             if not result.available:
                 grade = "UNKNOWN"
             elif kev_matches:
                 grade = "HIGH"
+            elif result.cve_ids and not kev_checked:
+                grade = "UNKNOWN"
             elif result.cve_ids:
                 grade = "MED"
             else:
@@ -309,13 +344,17 @@ def build_server(
                 "packages": result.items,
                 "kev_matches": kev_matches,
                 "kev_match_count": len(kev_matches),
+                "kev_checked": kev_checked,
                 "grade": grade,
                 "kev_feed": kev_feed,
                 "vulnix_caveat": vulnixmod.VULNIX_CAVEAT,
                 "advisory_notice": ADVISORY_NOTICE,
             }
-            if result.degraded_reason:
-                payload["degraded"] = {"reason": result.degraded_reason}
+            degraded_reasons = [
+                r for r in (result.degraded_reason, kev_degraded_reason) if r
+            ]
+            if degraded_reasons:
+                payload["degraded"] = {"reason": "; ".join(degraded_reasons)}
 
             if review_id:
                 review = store.get_review(review_id)
@@ -326,8 +365,11 @@ def build_server(
                     "vulnix_available": result.available,
                     "cve_count": len(result.cve_ids),
                     "kev_match_count": len(kev_matches),
+                    "kev_checked": kev_checked,
                     "grade": grade,
                 }
+                if degraded_reasons:
+                    review["attestation"]["degraded"] = payload["degraded"]
                 # Escalate the review's overall grade if a KEV hit outranks it.
                 if _grade_rank(grade) > _grade_rank(review.get("overall_grade", "NONE")):
                     review["overall_grade"] = grade
