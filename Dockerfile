@@ -61,6 +61,10 @@ WORKDIR /app
 COPY --from=builder /wheels /app/site-packages
 RUN mkdir -p /data && chown -R mcp:mcp /app /data
 
+# FastMCP 4 phones PyPI on every start (GET https://pypi.org/pypi/fastmcp/json)
+# to print an update notice in the banner. Nothing in the container acts on it.
+ENV FASTMCP_CHECK_FOR_UPDATES=off
+
 USER mcp
 
 EXPOSE 3722

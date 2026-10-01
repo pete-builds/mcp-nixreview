@@ -51,22 +51,22 @@ def test_the_expected_eight_are_present(tools):
 
 def test_nothing_is_destructive(tools):
     """This server never applies a change and has no delete path."""
-    assert [n for n, t in tools.items() if t.annotations.destructiveHint] == []
+    assert [n for n, t in tools.items() if t.annotations.destructive_hint] == []
 
 
 def test_writes_are_never_marked_read_only(tools):
-    mislabelled = [n for n in WRITES if tools[n].annotations.readOnlyHint]
+    mislabelled = [n for n in WRITES if tools[n].annotations.read_only_hint]
     assert mislabelled == []
 
 
 def test_local_tools_do_not_claim_an_open_world(tools):
-    wrong = [n for n in LOCAL if tools[n].annotations.openWorldHint is not False]
+    wrong = [n for n in LOCAL if tools[n].annotations.open_world_hint is not False]
     assert wrong == []
 
 
 def test_the_two_outward_tools_do(tools):
     """attest_closure shells out to vulnix and consults KEV; refresh fetches it."""
-    wrong = [n for n in REMOTE if tools[n].annotations.openWorldHint is not True]
+    wrong = [n for n in REMOTE if tools[n].annotations.open_world_hint is not True]
     assert wrong == []
 
 
@@ -78,7 +78,7 @@ def test_recording_a_decision_is_not_idempotent(tools):
     second call was a no-op, which is exactly what the ledger must not imply.
     """
     for name in ("review_diff", "request_approval", "approve", "attest_closure"):
-        assert tools[name].annotations.idempotentHint is False, name
+        assert tools[name].annotations.idempotent_hint is False, name
 
 
 def test_refreshing_the_cache_is_idempotent(tools):
@@ -87,4 +87,4 @@ def test_refreshing_the_cache_is_idempotent(tools):
     Marking it non-idempotent alongside the ledger writers would be a false
     alarm, and hints that cry wolf get ignored.
     """
-    assert tools["refresh_kev_cache"].annotations.idempotentHint is True
+    assert tools["refresh_kev_cache"].annotations.idempotent_hint is True
