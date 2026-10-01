@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import fastmcp
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -29,6 +30,10 @@ from mcp_nixreview.store import Store
 logger = logging.getLogger("mcp_nixreview.server")
 
 _MAX_INLINE_CONFIG_BYTES = 512 * 1024  # 512 KiB guard on inline config text
+
+#: Idle streamable-http sessions are reaped after this many seconds. The value
+#: the MCP SDK itself defaults to and recommends.
+SESSION_IDLE_TIMEOUT_SECONDS = 1800.0
 
 
 # --- Tool annotations ---
@@ -687,7 +692,23 @@ def build_server(
     return mcp
 
 
+def apply_session_idle_timeout() -> float | None:
+    """Give streamable-http sessions an idle timeout under FastMCP 4.
+
+    FastMCP 4 passes ``session_idle_timeout`` to the SDK session manager
+    explicitly, as None unless its ``http_session_idle_timeout`` setting is
+    set, which overrides the SDK's own 1800s default. Nothing errors and
+    nothing logs: abandoned sessions are simply never reaped. Measured on the
+    session manager: FastMCP 3.4.7 (SDK 1.30) gave it 1800s, FastMCP 4.0.10
+    gives it None. An explicit ``FASTMCP_HTTP_SESSION_IDLE_TIMEOUT`` still wins.
+    """
+    if fastmcp.settings.http_session_idle_timeout is None:
+        fastmcp.settings.http_session_idle_timeout = SESSION_IDLE_TIMEOUT_SECONDS
+    return fastmcp.settings.http_session_idle_timeout
+
+
 def main() -> None:
+    apply_session_idle_timeout()
     settings = load_settings()
     configure_logging(level=settings.log_level, fmt=settings.log_format)
     logger.info(
