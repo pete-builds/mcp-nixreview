@@ -19,7 +19,7 @@ dependencies = [
     "python-dotenv==1.2.3",
     "pydantic==2.13.5",
     "pydantic-settings==2.15.0",
-    "tzdata==2026.4",
+    "tzdata==2026.5",
 ]
 
 [project.optional-dependencies]
