@@ -18,12 +18,12 @@ dependencies = [
     "uvicorn==0.54.0",
     "python-dotenv==1.2.4",
     "pydantic==2.14.1",
-    "pydantic-settings==2.16.1",
-    "tzdata==2026.5",
+    "pydantic-settings==2.16.2",
+    "tzdata==2026.6",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==9.2.0", "pytest-asyncio==1.4.0", "ruff==0.17.1"]
+dev = ["pytest==9.2.0", "pytest-asyncio==1.4.0", "ruff==0.17.3"]
 
 [project.scripts]
 mcp-nixreview = "mcp_nixreview.server:main"
