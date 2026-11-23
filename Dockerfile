@@ -17,7 +17,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Runtime deps install from uv.lock, hash-pinned. uv.lock records a sha256 for
-# every package on every platform; `uv export --frozen` writes the runtime set
+# every package on every platform; `uv export --locked` (which refuses a lock
+# that no longer matches pyproject.toml) writes the runtime set
 # (no dev extra, not the project itself) as a requirements file WITH those hashes,
 # and pip's --require-hashes refuses anything that does not match. pip evaluates
 # the environment markers, so Windows- or browser-only entries are skipped here.
@@ -26,7 +27,7 @@ ENV PYTHONUNBUFFERED=1 \
 # Update deps with `uv lock` (Dependabot's uv updater does this itself).
 COPY --from=ghcr.io/astral-sh/uv:0.12.5@sha256:e85be844203885286c60ffad8a858d48afb6c5a5c237ca0e67f12e74b8f174b1 /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock ./
-RUN uv export --frozen --no-dev --no-emit-project --format requirements-txt -o requirements.txt \
+RUN uv export --locked --no-dev --no-emit-project --format requirements-txt -o requirements.txt \
     && pip install --no-cache-dir --require-hashes --target /wheels -r requirements.txt
 
 COPY README.md ./

@@ -210,10 +210,13 @@ agent writes config              →  mcp-nixreview reviews          →  human 
 ## Development
 
 ```bash
-pip install -e ".[dev]"
-ruff check src tests
-pytest -q
+uv sync --locked --extra dev
+uv run ruff check src tests
+uv run pytest -q
 ```
+
+Dependencies are pinned in `pyproject.toml` and locked in `uv.lock`. After changing a pin,
+run `uv lock` and commit both files; CI refuses a lock that does not match.
 
 ## License
 
