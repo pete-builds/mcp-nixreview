@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# uv is pinned here (and in the Dockerfile) on purpose: a floating resolver turns a
+# routine dependency PR into a silent resolver migration. Dependabot will not bump
+# it, so moving uv is a deliberate change in both places.
+env:
+  UV_VERSION: "0.12.5"
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -17,16 +23,36 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+      - name: Install uv
+        run: python -m pip install "uv==${UV_VERSION}"
+      - name: Install from the lock
+        # --locked installs exactly what uv.lock says and REFUSES when uv.lock no
+        # longer matches pyproject.toml. That refusal matters: `test` is the only
+        # required check, and --frozen would install a stale lock silently and stay
+        # green while the image shipped the old pin.
+        run: uv sync --locked --extra dev
       - name: Lint
-        run: ruff check src tests
+        run: uv run --frozen ruff check src tests
       - name: Import smoke
-        run: python -c "from mcp_nixreview.server import build_server, main; print('import ok')"
+        run: uv run --frozen python -c "from mcp_nixreview.server import build_server, main; print('import ok')"
       - name: Tests
-        run: pytest -q
+        run: uv run --frozen pytest -q
+
+  lock:
+    name: uv.lock matches pyproject
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install uv
+        run: python -m pip install "uv==${UV_VERSION}"
+      - name: Check the lock
+        # Fails when pyproject.toml changed without relocking. Unlike the old
+        # full-recompile drift check it does not re-resolve against today's PyPI,
+        # so an upstream release can no longer turn this red with no commit behind it.
+        run: uv lock --check
 
   trivy:
     runs-on: ubuntu-latest
@@ -65,8 +91,8 @@ jobs:
         # Dockerfile FROM tag from 3.13 to 3.14 on sister repos and ship a
         # runtime no lockfile or check had exercised, with CI fully green.
         #
-        # pyproject requires >=3.13, ruff targets py313 and requirements.lock is
-        # compiled with --python-version 3.13, so the image must agree.
+        # pyproject requires >=3.13, ruff targets py313 and the test job runs on
+        # 3.13 from uv.lock, so the image must agree.
         # --entrypoint is required: the image's ENTRYPOINT is the server itself.
         run: |
           docker run --rm --entrypoint python mcp-nixreview:ci -c '
@@ -75,8 +101,16 @@ jobs:
           got = sys.version_info[:2]
           assert got == want, (
               f"image ships Python {sys.version.split()[0]}, but pyproject, ruff "
-              f"and requirements.lock all target {want[0]}.{want[1]}. Fix the "
+              f"and the tests all target {want[0]}.{want[1]}. Fix the "
               f"Dockerfile FROM tag, or retarget every version surface together."
           )
           print(f"image Python {sys.version.split()[0]} matches target {want[0]}.{want[1]}")
           '
+
+      - name: The image's installed dependencies import the server
+        # The image's dependency set comes from `uv export` in the builder, a path
+        # the test job never runs. Importing the server inside the image, as the
+        # runtime user, proves that export installed everything the server needs.
+        run: |
+          docker run --rm --entrypoint python mcp-nixreview:ci -c \
+            'from mcp_nixreview.server import build_server, main; print("image import ok")'

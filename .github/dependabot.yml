@@ -1,6 +1,9 @@
 version: 2
 updates:
-  - package-ecosystem: "pip"
+  # uv, not pip: Dependabot's pip updater could edit requirements.in but never
+  # regenerate the hash-pinned requirements.lock, so every dependency PR arrived
+  # red. The uv updater edits pyproject.toml and uv.lock together.
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
@@ -9,7 +12,7 @@ updates:
     schedule:
       interval: "weekly"
     # A base-image version jump is a coordinated change, not a dependency bump:
-    # the Dockerfile FROM tag and requirements.lock (--python-version) have to
+    # the Dockerfile FROM tag, pyproject requires-python and ruff's target have to
     # move together. Dependabot moves only the first, and it reads as noise in
     # review, which is how Python 3.14 shipped against 3.13 lockfiles elsewhere
     # in this fleet. Digest refreshes and patch bumps still flow, so security
